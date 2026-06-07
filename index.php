@@ -1,72 +1,113 @@
 <?php
+session_start();
 date_default_timezone_set('Asia/Jakarta');
 
-// --- DATABASE HELPER ---
-function db($file) {
-    $path = 'data/' . $file . '.json';
-    if(!file_exists($path)) return [];
-    return json_decode(@file_get_contents($path), true) ?: [];
+// --- DATABASE ENGINE (JSON) ---
+$paths = [
+    'links' => '../data/links.json',
+    'payments' => '../data/payments.json',
+    'banks' => '../data/banks.json',
+    'settings' => '../data/settings.json',
+    'logs' => '../data/logs.json'
+];
+
+if (!file_exists('../data')) mkdir('../data', 0777, true);
+if (!file_exists('../uploads')) mkdir('../uploads', 0777, true);
+foreach ($paths as $f) { if (!file_exists($f)) file_put_contents($f, json_encode([])); }
+
+function db($k) { 
+    global $paths; 
+    $content = @file_get_contents($paths[$k]);
+    $data = json_decode($content, true);
+    return is_array($data) ? $data : []; 
+}
+function save($k, $d) { global $paths; file_put_contents($paths[$k], json_encode($d, JSON_PRETTY_PRINT)); }
+
+// --- CONFIG & AUTH ---
+$config = db('settings');
+if(empty($config)) { 
+    $config = ["username" => "admin", "password" => "MasterP4ssw0rd", "name" => "SWS Administrator", "pic" => "https://ui-avatars.com/api/?name=Admin", "lang" => "id"]; 
+    save('settings', $config); 
 }
 
-function save($file, $data) {
-    file_put_contents('data/' . $file . '.json', json_encode($data, JSON_PRETTY_PRINT));
+if (isset($_POST['login'])) {
+    if ($_POST['user'] === $config['username'] && $_POST['pass'] === $config['password']) {
+        $_SESSION['sws_auth'] = true;
+        $logs = db('logs');
+        $logs[] = ['ip' => $_SERVER['REMOTE_ADDR'], 'date' => date('d M Y'), 'time' => date('H:i:s')];
+        save('logs', array_slice($logs, -15));
+        header("Location: index.php"); exit;
+    } else { $error = "Kredensial Login Tidak Valid."; }
 }
+if (isset($_GET['logout'])) { session_destroy(); header("Location: index.php"); exit; }
+$auth = $_SESSION['sws_auth'] ?? false;
 
-$banks = db('banks');
-$pays = db('payments');
+if ($auth) {
+    $page = $_GET['page'] ?? 'dashboard';
 
-// --- LOGIC: PENCARIAN STATUS (MULTIPLE RESULTS) ---
-$search_results = null;
-$search_query = "";
-if (isset($_POST['search_status'])) {
-    $search_query = strtolower(trim($_POST['query']));
-    $search_results = [];
-
-    foreach ($pays as $id => $v) {
-        $clean_id = str_replace(['#', 'trx-', 'TRX-'], '', strtolower($id));
-        $clean_query = str_replace(['#', 'trx-', 'TRX-'], '', $search_query);
-
-        $match_name = (isset($v['sender']) && strpos(strtolower($v['sender']), $search_query) !== false);
-        $match_email = (isset($v['email']) && strtolower($v['email']) == $search_query);
-        $match_id = ($clean_id == $clean_query);
-
-        if ($match_name || $match_email || $match_id) {
-            $v['id'] = $id;
-            $search_results[] = $v;
-        }
+    // --- ACTIONS ---
+    // Save Link (Create & Edit)
+    if (isset($_POST['save_link'])) {
+        $links = db('links');
+        $id = $_POST['link_id'] ?: strtoupper(bin2hex(random_bytes(6)));
+        $amt = preg_replace('/[^0-9]/', '', $_POST['amount']);
+        $links[$id] = [
+            'id' => $id, 
+            'title' => $_POST['title'], 
+            'customer' => $_POST['customer'], 
+            'product' => $_POST['product'],
+            'amount' => (int)$amt, 
+            'notes' => $_POST['notes'], 
+            'methods' => $_POST['methods'] ?? [],
+            'exp_type' => $_POST['exp_type'], 
+            'exp_date' => $_POST['exp_date'], 
+            'created_at' => (isset($_POST['link_id']) && isset($links[$id])) ? $links[$id]['created_at'] : date('Y-m-d H:i:s')
+        ];
+        save('links', $links);
+        header("Location: index.php?page=links&msg=success"); exit;
     }
 
-    usort($search_results, function($a, $b) {
-        $tA = strtotime(str_replace('/', '-', $a['date'] ?? '01/01/2020 00:00'));
-        $tB = strtotime(str_replace('/', '-', $b['date'] ?? '01/01/2020 00:00'));
-        return $tB - $tA;
-    });
-}
+    // Delete Link
+    if (isset($_GET['del_link'])) {
+        $links = db('links'); 
+        unset($links[$_GET['del_link']]);
+        save('links', $links); 
+        header("Location: index.php?page=links"); exit;
+    }
 
-// --- LOGIC: PEMBAYARAN MANDIRI ---
-if (isset($_POST['direct_pay'])) {
-    $id = strtoupper(bin2hex(random_bytes(6))); 
-    $amt = preg_replace('/[^0-9]/', '', $_POST['amount']);
-    $ext = strtolower(pathinfo($_FILES['proof']['name'], PATHINFO_EXTENSION));
-    
-    if (in_array($ext, ['png', 'jpg', 'jpeg'])) {
-        $fn = "proof_direct_" . time() . "_" . $id . "." . $ext;
-        if (move_uploaded_file($_FILES['proof']['tmp_name'], "uploads/" . $fn)) {
-            $pays[$id] = [
-                'sender' => $_POST['full_name'],
-                'email' => $_POST['email'],
-                'amount' => (int)$amt,
-                'title' => $_POST['product_name'] ?: 'Pembayaran Mandiri',
-                'notes' => $_POST['notes'],
-                'method' => $_POST['method'],
-                'proof' => $fn,
-                'status' => 'Pending',
-                'date' => date('d/m/Y H:i')
-            ];
-            save('payments', $pays);
-            header("Location: index.php?success_id=" . $id . "#sect-pay");
-            exit;
+    // Delete Payment Data (NEW)
+    if (isset($_GET['del_pay'])) {
+        $p = db('payments'); 
+        unset($p[$_GET['del_pay']]);
+        save('payments', $p); 
+        header("Location: index.php?page=payments"); exit;
+    }
+
+    // Update Payment Status
+    if (isset($_POST['upd_pay_status'])) {
+        $p = db('payments');
+        if(isset($p[$_POST['pid']])) { $p[$_POST['pid']]['status'] = $_POST['status']; save('payments', $p); }
+        header("Location: index.php?page=payments"); exit;
+    }
+
+    // Save Profile Settings
+    if (isset($_POST['save_settings'])) {
+        $config['username'] = $_POST['new_user'];
+        if(!empty($_POST['new_pass'])) $config['password'] = $_POST['new_pass'];
+        save('settings', $config); header("Location: index.php?page=settings&msg=1"); exit;
+    }
+
+    // Update Bank Data
+    if (isset($_POST['update_bank'])) {
+        $banks = db('banks');
+        $bn = $_POST['bank_name'];
+        $banks[$bn] = ['active' => isset($_POST['active']), 'owner' => $_POST['owner'], 'acc' => $_POST['acc'] ?? '', 'nmid' => $_POST['nmid'] ?? '', 'qris_img' => $_POST['old_qris'] ?? ''];
+        if(!empty($_FILES['qris_img']['name'])){
+            $fn = "qris_".time().".png";
+            move_uploaded_file($_FILES['qris_img']['tmp_name'], "../uploads/".$fn);
+            $banks[$bn]['qris_img'] = $fn;
         }
+        save('banks', $banks); header("Location: index.php?page=banks"); exit;
     }
 }
 ?>
@@ -74,370 +115,382 @@ if (isset($_POST['direct_pay'])) {
 <html lang="id">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SWSAGroup Pay</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SWSAGroup Pay | Login Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
     <style>
-        :root { --primary: #003399; --accent: #c5a059; --bg: #fdfdfd; }
-        html, body { height: 100%; margin: 0; }
-        body { 
-            display: flex; flex-direction: column; font-family: 'Plus Jakarta Sans', sans-serif; background-color: var(--bg); color: #1e293b; 
-            background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%23003399' fill-opacity='0.012' fill-rule='evenodd'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/svg%3E"); 
-            -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none;
+        :root { --blue: #003399; --gold: #c5a059; --bg: #f8fafc; --sidebar-width: 280px; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: #334155; overflow-x: hidden; }
+        
+        /* Sidebar Styles */
+        #sidebar { 
+            width: var(--sidebar-width); height: 100vh; position: fixed; 
+            background: #fff; border-right: 1px solid #e2e8f0; z-index: 1050; 
+            transition: all 0.3s; 
         }
-        input, textarea, select { user-select: text !important; }
-        .hero-compact { padding: 30px 0 50px; background: linear-gradient(135deg, #001a4d 0%, var(--primary) 100%); color: white; border-bottom: 4px solid var(--accent); text-align: center; }
-        .portal-wrapper { max-width: 940px; margin: 30px auto; padding: 0 15px; flex: 1 0 auto; width: 100%; }
-        .mac-card-ui { background: #ffffff; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.05); border: 1px solid rgba(0,0,0,0.05); overflow: hidden; }
-        .mac-bar { background: #f8fafc; padding: 12px 20px; display: flex; align-items: center; border-bottom: 1px solid #edf2f7; }
-        .mac-dots { display: flex; gap: 6px; }
-        .mac-dot { width: 10px; height: 10px; border-radius: 50%; }
-        .dot-1 { background: #ff5f56; } .dot-2 { background: #ffbd2e; } .dot-3 { background: #27c93f; }
-        .mac-status { margin-left: auto; font-size: 10px; font-weight: 800; color: #94a3b8; letter-spacing: 1.2px; }
-        .nav-scroller { background: #fff; margin: 20px 0; padding: 6px; border-radius: 14px; border: 1px solid #e2e8f0; display: flex; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; gap: 6px; scrollbar-width: none; }
-        .nav-link-item { padding: 10px 20px; border-radius: 10px; font-size: 13px; font-weight: 700; color: #64748b; text-decoration: none; transition: 0.3s; display: inline-block; flex: 0 0 auto; }
-        .nav-link-item.active { background: var(--primary); color: #fff; box-shadow: 0 4px 10px rgba(0, 51, 153, 0.2); }
-        .sect-title { font-weight: 800; color: var(--primary); font-size: 1.3rem; margin-bottom: 25px; display: flex; align-items: center; }
-        .content-padding { padding: 40px; }
-        .form-label-modern { font-size: 11px; font-weight: 800; text-transform: uppercase; color: #64748b; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
-        .form-label-modern i { color: var(--primary); font-size: 14px; }
-        .input-modern { border: 1.5px solid #e2e8f0; padding: 12px 16px; border-radius: 12px; font-weight: 600; transition: all 0.3s; background: #f8fafc; }
-        .input-modern:focus { border-color: var(--primary); background: #fff; box-shadow: 0 0 0 4px rgba(0, 51, 153, 0.05); outline: none; }
-        .upload-zone { border: 2px dashed #cbd5e1; background: #f8fafc; border-radius: 15px; padding: 30px; text-align: center; transition: 0.3s; cursor: pointer; position: relative; }
-        .upload-zone:hover { border-color: var(--primary); background: rgba(0, 51, 153, 0.02); }
-        .captcha-header { background: var(--primary); color: #fff; padding: 20px; text-align: left; }
-        .captcha-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; background: #fff; }
-        .captcha-img-box { width: 100%; aspect-ratio: 1/1; position: relative; cursor: pointer; overflow: hidden; }
-        .captcha-img-box img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.2s; }
-        .captcha-img-box.selected::after { content: "\f058"; font-family: "Font Awesome 6 Free"; font-weight: 900; position: absolute; top: 5px; left: 5px; color: var(--primary); background: #fff; border-radius: 50%; font-size: 18px; }
-        .table-modern { border-collapse: separate; border-spacing: 0 8px; }
-        .table-modern td { padding: 12px 15px; background: #fff; border-top: 1px solid #f1f5f9; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
-        .status-pill { font-size: 10px; font-weight: 800; padding: 5px 12px; border-radius: 6px; text-transform: uppercase; }
-        .pill-pending { background: #fffbeb; color: #92400e; }
-        .pill-paid { background: #f0fdf4; color: #166534; }
-        .pill-suspend { background: #fef2f2; color: #991b1b; }
-        .footer-accent { background: #000; color: #fff; padding: 40px 0; border-top: 5px solid var(--accent); text-align: center; flex-shrink: 0; }
+        #main { margin-left: var(--sidebar-width); padding: 40px; transition: all 0.3s; }
+        
+        /* Mobile Warning Overlay */
+        #mobile-warning {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #ffffff;
+            z-index: 99999;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 20px;
+        }
+        #mobile-warning i { font-size: 60px; color: var(--blue); margin-bottom: 20px; }
+        #mobile-warning h4 { font-weight: 700; color: #1e293b; }
+        #mobile-warning p { color: #64748b; max-width: 300px; }
+
+        @media (max-width: 991px) {
+            #mobile-warning { display: flex; }
+            body { overflow: hidden; } /* Disable scroll on mobile */
+            #sidebar, #main, .sidebar-overlay { display: none !important; }
+        }
+
+        .nav-link { color: #64748b; padding: 12px 25px; border-left: 4px solid transparent; font-weight: 500; transition: 0.2s; }
+        .nav-link:hover, .nav-link.active { background: #f1f5f9; color: var(--blue); border-left-color: var(--blue); }
+        .card-pro { border: none; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); background: #fff; }
+        .card-header-sws { background: #fff; border-bottom: 2px solid var(--blue); color: var(--blue); font-weight: 700; }
+        
+        .batik-overlay { 
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+            opacity: 0.02; pointer-events: none; 
+            background-image: url("data:image/svg+xml,%3Csvg width='100' height='100' viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M11 18c3.866 0 7-3.134 7-7s-3.134-7-7-7-7 3.134-7 7 3.134 7 7 7zm48 25c3.866 0 7-3.134 7-7s-3.134-7-7-7-7 3.134-7 7 3.134 7 7 7zm-43-7c1.657 0 3-1.343 3-3s-1.343-3-3-3-3 1.343-3 3 1.343 3 3 3zm63 31c1.657 0 3-1.343 3-3s-1.343-3-3-3-3 1.343-3 3 1.343 3 3 3z' fill='%23003399'/%3E%3C/svg%3E"); 
+        }
+        
+        .stat-icon { width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 15px; }
+        .bg-success-light { background: #dcfce7; color: #166534; }
+        .bg-warning-light { background: #fef9c3; color: #854d0e; }
+        .bg-danger-light { background: #fee2e2; color: #991b1b; }
+        .bg-primary-light { background: #e0f2fe; color: #0369a1; }
     </style>
 </head>
-<body oncontextmenu="return false;">
-
-<header class="hero-compact">
-    <div class="container">
-        <h1 class="fw-800 mb-1">SWSAGroup Pay</h1>
-        <p class="small opacity-75 mb-0">SWSAGroup Payment Gateway</p>
-    </div>
-</header>
-
-<div class="portal-wrapper">
-    <div class="mac-card-ui">
-        <div class="mac-bar">
-            <div class="mac-dots"><div class="mac-dot dot-1"></div><div class="mac-dot dot-2"></div><div class="mac-dot dot-3"></div></div>
-            <div class="mac-status"><span id="load-ms">--</span>ms | ENCRYPTED</div>
+<body>
+    <!-- Mobile Access Restriction -->
+    <div id="mobile-warning">
+        <i class="fas fa-desktop"></i>
+        <h4>Akses Terbatas</h4>
+        <p>Demi menjaga keamanan sistem <b>SWSAGroup Pay</b>, dashboard administrator hanya dapat diakses melalui perangkat <b>Desktop/Laptop</b>.</p>
+        <div class="mt-3">
+            <small class="text-muted fw-bold">SWSAGroup Security Protocol</small>
         </div>
     </div>
 
-    <nav class="nav-scroller">
-        <a href="javascript:void(0)" class="nav-link-item active" id="tab-status" onclick="openSect('status')"><i class="fa fa-history me-2"></i>Status Transaksi</a>
-        <a href="javascript:void(0)" class="nav-link-item" id="tab-pay" onclick="openSect('pay')"><i class="fa fa-wallet me-2"></i>Bayar Mandiri</a>
-        <a href="javascript:void(0)" class="nav-link-item" id="tab-help" onclick="openSect('help')"><i class="fa fa-headset me-2"></i>Bantuan</a>
+    <div class="batik-overlay"></div>
+    <div class="sidebar-overlay" id="overlay" onclick="toggleSidebar()"></div>
+
+<?php if (!$auth): ?>
+    <div class="d-flex align-items-center justify-content-center vh-100 p-3">
+        <div class="card card-pro p-4 shadow-lg" style="width: 400px; border-top: 6px solid var(--gold);">
+            <div class="text-center mb-4">
+                <h4 class="fw-bold text-primary mb-0">SWSAGroup Pay</h4>
+                <small class="text-muted fw-bold">PAYMENT GATEWAY</small>
+            </div>
+            <?php if(isset($error)) echo "<div class='alert alert-danger small'>$error</div>"; ?>
+            <form method="POST">
+                <div class="mb-3"><label class="small fw-bold">USER ID</label><input type="text" name="user" class="form-control" required></div>
+                <div class="mb-4"><label class="small fw-bold">PASSWORD</label><input type="password" name="pass" class="form-control" required></div>
+                <button type="submit" name="login" class="btn btn-primary w-100 fw-bold py-2">LOGIN</button>
+            </form>
+        </div>
+    </div>
+<?php else: ?>
+
+    <nav id="sidebar">
+        <div class="p-4 border-bottom d-flex justify-content-between align-items-center">
+            <div>
+                <h5 class="fw-bold text-primary m-0">SWSAGroup</h5>
+                <small class="text-muted fw-bold">Admin Panel</small>
+            </div>
+            <button class="btn d-lg-none" onclick="toggleSidebar()"><i class="fa fa-times"></i></button>
+        </div>
+        <div class="nav flex-column mt-3">
+            <a href="?page=dashboard" class="nav-link <?= $page=='dashboard'?'active':'' ?>"><i class="fa fa-chart-line me-3"></i>Dashboard</a>
+            <a href="?page=links" class="nav-link <?= $page=='links'?'active':'' ?>"><i class="fa fa-link me-3"></i>Link Payment</a>
+            <a href="?page=payments" class="nav-link <?= $page=='payments'?'active':'' ?>"><i class="fa fa-exchange-alt me-3"></i>Manage Payment</a>
+            <a href="?page=banks" class="nav-link <?= $page=='banks'?'active':'' ?>"><i class="fa fa-university me-3"></i>Manage Bank</a>
+            <a href="?page=settings" class="nav-link <?= $page=='settings'?'active':'' ?>"><i class="fa fa-cog me-3"></i>Settings</a>
+            <a href="?logout=1" class="nav-link text-danger mt-5"><i class="fa fa-power-off me-3"></i>Logout</a>
+        </div>
     </nav>
 
-    <div class="mac-card-ui">
-        <div class="content-padding">
-            <!-- SECTION: STATUS -->
-            <div id="sect-status">
-                <h5 class="sect-title"><i class="fa fa-search me-2 text-accent"></i> Penelusuran Transaksi</h5>
-                <form method="POST" class="mb-4">
-                    <div class="input-group">
-                        <input type="text" name="query" class="form-control shadow-none input-modern" placeholder="Cari Nama, Email, atau ID Transaksi..." value="<?= htmlspecialchars($search_query) ?>" required>
-                        <button class="btn btn-primary px-4" type="submit" name="search_status" style="border-radius: 0 12px 12px 0;"><i class="fa fa-search"></i></button>
-                    </div>
-                </form>
+    <div id="main">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div class="d-flex align-items-center">
+                <h4 class="fw-bold m-0 text-dark"><?= strtoupper($page) ?></h4>
+            </div>
+            <div class="small text-muted d-none d-md-block">Server Time: <?= date('H:i') ?> WIB</div>
+        </div>
 
-                <?php if ($search_results !== null): ?>
+        <?php if($page == 'dashboard'): ?>
+            <div class="row g-4 mb-4">
+                <?php 
+                    $links_all = db('links'); 
+                    $p_all = db('payments'); 
+                    $stat = ['Paid'=>0,'Pending'=>0,'Suspend'=>0]; 
+                    foreach($p_all as $v){ if(isset($v['status'])) $stat[$v['status']]++; } 
+                ?>
+                <div class="col-md-3">
+                    <div class="card card-pro p-3 border-0">
+                        <div class="stat-icon bg-success-light"><i class="fa fa-check-circle"></i></div>
+                        <small class="text-muted fw-bold">SUCCESS</small>
+                        <h3 class="fw-bold m-0"><?= $stat['Paid'] ?></h3>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-pro p-3 border-0">
+                        <div class="stat-icon bg-warning-light"><i class="fa fa-clock"></i></div>
+                        <small class="text-muted fw-bold">PENDING</small>
+                        <h3 class="fw-bold m-0"><?= $stat['Pending'] ?></h3>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-pro p-3 border-0">
+                        <div class="stat-icon bg-danger-light"><i class="fa fa-ban"></i></div>
+                        <small class="text-muted fw-bold">SUSPEND</small>
+                        <h3 class="fw-bold m-0"><?= $stat['Suspend'] ?></h3>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-pro p-3 border-0">
+                        <div class="stat-icon bg-primary-light"><i class="fa fa-link"></i></div>
+                        <small class="text-muted fw-bold">TOTAL LINKS</small>
+                        <h3 class="fw-bold m-0"><?= count($links_all) ?></h3>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card card-pro">
+                <div class="card-header card-header-sws px-4 py-3">NOTIFIKASI LOGIN TERBARU</div>
+                <div class="card-body p-0">
                     <div class="table-responsive">
-                        <?php if (empty($search_results)): ?>
-                            <div class="alert alert-light border text-center small text-muted p-4">Transaksi tidak ditemukan.</div>
-                        <?php else: ?>
-                            <div class="mb-2 small fw-bold text-muted">Ditemukan <?= count($search_results) ?> transaksi:</div>
-                            <table class="table table-modern align-middle">
-                                <thead><tr><th>Ref ID</th><th>Deskripsi</th><th>Status</th><th>Invoice</th></tr></thead>
-                                <tbody>
-                                    <?php foreach ($search_results as $res): ?>
-                                    <tr>
-                                        <td><code class="fw-bold text-dark">#<?= $res['id'] ?></code><br><span style="font-size: 9px;"><?= $res['date'] ?></span></td>
-                                        <td><span class="small fw-600"><?= $res['title'] ?></span></td>
-                                        <td><span class="status-pill <?= ($res['status']=='Paid')?'pill-paid':(($res['status']=='Suspend')?'pill-suspend':'pill-pending') ?>"><?= strtoupper($res['status']) ?></span></td>
-                                        <td>
-                                            <?php if($res['status'] == 'Paid'): ?>
-                                                <a href="pay.php?n=<?= $res['id'] ?>&dl=1" class="btn btn-outline-primary btn-sm rounded-pill fw-bold px-3" style="font-size: 9px;">CETAK</a>
-                                            <?php else: ?>
-                                                <i class="fa fa-clock text-muted opacity-50"></i>
-                                            <?php endif; ?>
-                                        </td>
-                                    </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        <?php endif; ?>
+                        <table class="table align-middle mb-0">
+                            <thead class="table-light">
+                                <tr><th class="px-4">IP ADDRESS</th><th>TANGGAL</th><th>JAM</th><th>STATUS</th></tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach(array_reverse(db('logs')) as $log): ?>
+                                <tr>
+                                    <td class="px-4"><code><?= $log['ip'] ?></code></td>
+                                    <td><?= $log['date'] ?></td>
+                                    <td><?= $log['time'] ?></td>
+                                    <td><span class="badge bg-success-light text-success">Authorized</span></td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
                     </div>
-                <?php endif; ?>
+                </div>
             </div>
 
-            <!-- SECTION: PAY MANDIRI -->
-            <div id="sect-pay" class="d-none">
-                <h5 class="sect-title"><i class="fa fa-plus-circle me-2 text-accent"></i> Pembayaran Mandiri</h5>
-                <form method="POST" enctype="multipart/form-data" class="row g-4" id="mainPayForm">
-                    <div class="col-md-6">
-                        <label class="form-label-modern"><i class="fa fa-user"></i> Nama Lengkap</label>
-                        <input type="text" name="full_name" class="form-control input-modern" placeholder="Contoh: John Doe (Sesuai nama rekening)" required>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label-modern"><i class="fa fa-envelope"></i> Alamat Email</label>
-                        <input type="email" name="email" class="form-control input-modern" placeholder="Contoh: user@gmail.com (Untuk notifikasi status)" required>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label-modern"><i class="fa fa-university"></i> Metode Pembayaran</label>
-                        <select name="method" class="form-select input-modern" id="bankSelect" required>
-                            <option value="">-- Pilih Rekening Tujuan --</option>
-                            <?php foreach($banks as $name => $b): if($b['active']): ?><option value="<?= $name ?>"><?= $name ?></option><?php endif; endforeach; ?>
-                        </select>
-                        <div id="methodDetail" class="mt-3 p-3 border rounded-4 bg-light d-none text-center"></div>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label-modern"><i class="fa fa-tag"></i> Nominal Transfer (IDR)</label>
-                        <input type="text" id="amountIn" name="amount" class="form-control input-modern fw-800 text-primary" placeholder="Contoh: 150000 (Isi nominal asli yang dikirim)" required>
-                    </div>
-                    <div class="col-12">
-                        <label class="form-label-modern"><i class="fa fa-shopping-bag"></i> Produk / Layanan</label>
-                        <input type="text" name="product_name" class="form-control input-modern" placeholder="Contoh: Perpanjang biaya web hosting, Pembayaran Domain, Pembayaran Hosting">
-                    </div>
-                    <div class="col-12">
-                        <label class="form-label-modern"><i class="fa fa-camera"></i> Bukti Pembayaran</label>
-                        <div class="upload-zone" onclick="document.getElementById('proofInput').click()">
-                            <i class="fa fa-cloud-upload-alt text-primary mb-2" style="font-size: 30px;"></i>
-                            <p class="m-0 fw-bold small text-dark">Klik untuk unggah Foto Bukti Transfer</p>
-                            <p class="m-0 text-muted" style="font-size: 10px;">Format: JPG, JPEG, PNG (Maks 500MB)</p>
-                            <input type="file" name="proof" id="proofInput" class="d-none" accept=".jpg,.jpeg,.png" required onchange="updateFileName(this)">
-                            <div id="fileNameDisplay" class="mt-2 fw-bold text-primary small"></div>
+        <?php elseif($page == 'links'): ?>
+            <div class="d-flex flex-column flex-md-row justify-content-between mb-3 gap-2">
+                <input type="text" id="linkFilter" class="form-control w-100 w-md-50" placeholder="Cari Judul / Customer...">
+                <button class="btn btn-primary px-4 fw-bold shadow-sm" onclick="showModal()">+ BUAT LINK BARU</button>
+            </div>
+            <div class="card card-pro overflow-hidden">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="bg-light">
+                            <tr><th class="px-4">NOMOR</th><th>JUDUL / CUSTOMER</th><th>NOMINAL</th><th>AKSI</th></tr>
+                        </thead>
+                        <tbody id="linkBody">
+                            <?php foreach(array_reverse(db('links'), true) as $id => $v): ?>
+                            <tr>
+                                <td class="px-4"><code><?= $id ?></code></td>
+                                <td><strong><?= $v['title'] ?></strong><br><small class="text-muted"><?= $v['customer'] ?></small></td>
+                                <td class="fw-bold text-primary">Rp <?= number_format($v['amount'], 0, ',', '.') ?></td>
+                                <td>
+                                    <div class="btn-group">
+                                        <button onclick='editLink("<?= $id ?>", <?= json_encode($v) ?>)' class="btn btn-sm btn-outline-primary" title="Edit"><i class="fa fa-edit"></i></button>
+                                        <button onclick="copy('<?= $id ?>')" class="btn btn-sm btn-outline-secondary" title="Salin Link"><i class="fa fa-copy"></i></button>
+                                        <a href="?page=links&del_link=<?= $id ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Hapus link ini?')"><i class="fa fa-trash"></i></a>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        <?php elseif($page == 'payments'): ?>
+            <div class="d-flex flex-column flex-md-row justify-content-between mb-3 gap-2">
+                <input type="text" id="payFilter" class="form-control w-100 w-md-50" placeholder="Cari Nama, Nomor Bayar...">
+                <button onclick="exportExcel()" class="btn btn-success fw-bold"><i class="fa fa-file-excel me-2"></i>Export Excel</button>
+            </div>
+            <div class="card card-pro overflow-hidden">
+                <div class="table-responsive">
+                    <table class="table align-middle mb-0" id="payTable">
+                        <thead class="bg-light">
+                            <tr><th class="px-4">NO. BAYAR</th><th>CUSTOMER</th><th>STATUS</th><th>AKSI</th></tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach(array_reverse(db('payments'), true) as $pid => $v): ?>
+                            <tr>
+                                <td class="px-4"><code><?= $pid ?></code></td>
+                                <td><strong><?= $v['sender'] ?></strong><br><small><?= $v['email'] ?></small></td>
+                                <td>
+                                    <form method="POST">
+                                        <input type="hidden" name="pid" value="<?= $pid ?>">
+                                        <select name="status" class="form-select form-select-sm" style="width:130px" onchange="this.form.submit()">
+                                            <option value="Pending" <?= ($v['status']??'')=='Pending'?'selected':'' ?>>Pending</option>
+                                            <option value="Paid" <?= ($v['status']??'')=='Paid'?'selected':'' ?>>Success</option>
+                                            <option value="Error" <?= ($v['status']??'')=='Error'?'selected':'' ?>>Error</option>
+                                            <option value="Suspend" <?= ($v['status']??'')=='Suspend'?'selected':'' ?>>Suspend</option>
+                                        </select>
+                                        <input type="hidden" name="upd_pay_status">
+                                    </form>
+                                </td>
+                                <td>
+                                    <div class="btn-group">
+                                        <button onclick="viewBukti('<?= $v['proof'] ?>')" class="btn btn-sm btn-info text-white"><i class="fa fa-image me-1"></i> CEK</button>
+                                        <a href="?page=payments&del_pay=<?= $pid ?>" class="btn btn-sm btn-danger" onclick="return confirm('Hapus data pembayaran ini?')"><i class="fa fa-trash"></i></a>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        <?php elseif($page == 'banks'): ?>
+            <div class="row g-4">
+                <?php 
+                    $bank_list = ['BCA Qris','BCA Bank Transfer','OVO','Go-Pay Transfer','Go-Pay Qris','Shopee-Pay','DANA','Blu by BCA Digital']; 
+                    $db_banks = db('banks'); 
+                ?>
+                <?php foreach($bank_list as $b): $curr = $db_banks[$b] ?? ['active'=>false,'owner'=>'','acc'=>'','nmid'=>'','qris_img'=>'']; ?>
+                <div class="col-md-4">
+                    <form class="card card-pro h-100 shadow-sm" method="POST" enctype="multipart/form-data">
+                        <div class="card-header card-header-sws d-flex justify-content-between align-items-center">
+                            <span class="small"><?= strtoupper($b) ?></span>
+                            <div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="active" <?= $curr['active']?'checked':'' ?>></div>
                         </div>
-                    </div>
-                    <div class="col-12 mt-4">
-                        <div id="captcha-status-area" class="p-3 border rounded-4 bg-light d-flex align-items-center justify-content-between">
-                            <div><i class="fa fa-shield-halved text-muted me-2" id="captcha-icon"></i><span class="small fw-800" id="captcha-text">Verifikasi Captcha</span></div>
-                            <button type="button" class="btn btn-dark btn-sm fw-bold px-3 rounded-pill" onclick="initCaptcha()" id="btn-start-captcha">Mulai Verifikasi</button>
+                        <div class="card-body">
+                            <input type="hidden" name="bank_name" value="<?= $b ?>">
+                            <div class="mb-2"><label class="small fw-bold">NAMA PEMILIK</label><input type="text" name="owner" class="form-control form-control-sm" value="<?= $curr['owner'] ?>"></div>
+                            <?php if(strpos($b,'Qris')!==false): ?>
+                                <div class="mb-2"><label class="small fw-bold">NMID</label><input type="text" name="nmid" class="form-control form-control-sm" value="<?= $curr['nmid'] ?>"></div>
+                                <div class="mb-2"><label class="small fw-bold">UPLOAD QRIS</label><input type="file" name="qris_img" class="form-control form-control-sm"></div>
+                                <input type="hidden" name="old_qris" value="<?= $curr['qris_img'] ?>">
+                            <?php else: ?>
+                                <div class="mb-2"><label class="small fw-bold">NO. REKENING</label><input type="text" name="acc" class="form-control form-control-sm" value="<?= $curr['acc'] ?>"></div>
+                            <?php endif; ?>
+                            <button type="submit" name="update_bank" class="btn btn-primary btn-sm w-100 mt-2 fw-bold">SIMPAN</button>
                         </div>
-                        <input type="hidden" name="captcha_verified" id="captcha_verified" value="0">
-                    </div>
-                    <div class="col-12 mt-4"><button type="submit" name="direct_pay" id="btnSubmitForm" class="btn btn-primary w-100 fw-800 py-3 shadow rounded-4" disabled>KIRIM KONFIRMASI PEMBAYARAN</button></div>
+                    </form>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+        <?php elseif($page == 'settings'): ?>
+            <div class="card card-pro p-4" style="max-width: 500px;">
+                <form method="POST">
+                    <div class="mb-3"><label class="small fw-bold">USER ID</label><input type="text" name="new_user" class="form-control" value="<?= $config['username'] ?>"></div>
+                    <div class="mb-3"><label class="small fw-bold">PASSWORD BARU</label><input type="password" name="new_pass" class="form-control" placeholder="Kosongkan jika tidak diganti"></div>
+                    <button type="submit" name="save_settings" class="btn btn-primary w-100 fw-bold py-2">UPDATE ACCOUNT</button>
                 </form>
             </div>
+        <?php endif; ?>
+    </div>
 
-            <!-- SECTION: HELP -->
-            <div id="sect-help" class="d-none">
-                <h5 class="sect-title"><i class="fa fa-info-circle me-2 text-accent"></i> Informasi & Dukungan</h5>
-                <div class="accordion accordion-flush mb-5" id="faqAccordion">
+    <!-- MODAL LINK -->
+    <div class="modal fade" id="modalLink" tabindex="-1">
+        <div class="modal-dialog modal-lg"><form class="modal-content border-0 shadow" method="POST">
+            <div class="modal-header border-0"><h5 class="fw-bold" id="mTitle">Generate New Link</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body p-4"><div class="row g-3">
+                <input type="hidden" name="link_id" id="mId">
+                <div class="col-md-6"><label class="small fw-bold">Judul Pembayaran</label><input type="text" name="title" id="mTi" class="form-control" required placeholder="Cth: Invoice Hosting"></div>
+                <div class="col-md-6"><label class="small fw-bold">Nama Customer</label><input type="text" name="customer" id="mCu" class="form-control" required placeholder="Cth: Budi Santoso"></div>
+                <div class="col-md-6"><label class="small fw-bold">Nama Produk (Opsional)</label><input type="text" name="product" id="mPr" class="form-control"></div>
+                <div class="col-md-6"><label class="small fw-bold">Nominal (Rp)</label><input type="text" id="amountIn" name="amount" class="form-control fw-bold" required></div>
+                <div class="col-md-6"><label class="small fw-bold">Expired</label><select name="exp_type" id="mEx" class="form-select" onchange="toggleDate(this.value)"><option value="Unlimited">Unlimited</option><option value="Specific">Specific Date</option></select></div>
+                <div id="dateBox" class="col-md-6 d-none"><label class="small fw-bold">Atur Tanggal</label><input type="datetime-local" name="exp_date" id="mEd" class="form-control"></div>
+                <div class="col-12"><label class="small fw-bold d-block mb-2">Pilihan Metode</label>
                     <?php 
-                    $faqs = [
-                        "Berapa lama proses verifikasi pembayaran?" => "Proses verifikasi umumnya memakan waktu 5-30 menit selama jam operasional aktif.",
-                        "Apa yang menyebabkan status 'Suspend'?" => "Status ini muncul jika nominal transfer tidak sesuai atau bukti transfer tidak valid.",
-                        "Bagaimana cara mengunduh invoice?" => "Setelah status PAID, gunakan fitur pencarian status lalu klik tombol CETAK.",
-                        "Jam berapa layanan verifikasi beroperasi?" => "Tim kami aktif setiap hari pukul 08:00 - 22:00 WIB.",
-                        "Metode pembayaran apa yang didukung?" => "Kami mendukung Transfer Bank Nasional dan E-Wallet via metode QRIS.",
-                        "Apakah data saya aman?" => "Tentu, setiap data transaksi dilindungi dengan protokol enkripsi SSL 256-bit.",
-                        "Bagaimana jika saya salah mengisi data email?" => "Mohon segera lapor ke admin WhatsApp Support dengan melampirkan ID transaksi Anda.",
-                        "Kenapa riwayat transaksi saya tidak muncul?" => "Sistem hanya menampilkan data yang sesuai dengan kata kunci (Email/Nama/ID) yang dimasukkan.",
-                        "Apakah ada biaya administrasi?" => "Biaya admin bervariasi tergantung pada metode pembayaran yang Anda pilih.",
-                        "Berapa batas maksimal upload bukti bayar?" => "Sistem menerima file gambar dengan ukuran maksimal hingga 500MB.",
-                        "Apakah pembayaran QRIS bisa otomatis?" => "Beberapa layanan QRIS kami sudah mendukung deteksi instan oleh sistem verifikasi.",
-                        "Dapatkah transaksi dibatalkan?" => "Transaksi yang sudah dalam antrean verifikasi tidak dapat dibatalkan.",
-                        "Kenapa Captcha tidak muncul?" => "Pastikan koneksi internet stabil dan browser Anda tidak memblokir skrip JavaScript.",
-                        "Apakah bukti pembayaran harus fisik?" => "Tidak, Anda dapat melampirkan screenshot mutasi rekening atau bukti m-banking.",
-                        "Ke mana saya harus melapor kendala sistem?" => "Anda dapat menghubungi tim teknis melalui tombol WhatsApp di bawah menu bantuan.",
-                        "Berapa lama riwayat transaksi disimpan?" => "Riwayat disimpan hingga 30 hari terakhir sebelum dibersihkan oleh sistem."
-                    ];
-                    $j=0; foreach($faqs as $q => $a): $j++; ?>
-                    <div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button collapsed small fw-bold" type="button" data-bs-toggle="collapse" data-bs-target="#faq<?= $j ?>"><?= $q ?></button></h2>
-                    <div id="faq<?= $j ?>" class="accordion-collapse collapse" data-bs-parent="#faqAccordion"><div class="accordion-body small text-muted"><?= $a ?></div></div></div>
+                    $bank_list_opt = ['BCA Qris','BCA Bank Transfer','OVO','Go-Pay Transfer','Go-Pay Qris','Shopee-Pay','DANA','Blu by BCA Digital'];
+                    foreach($bank_list_opt as $b_opt): 
+                    ?>
+                        <div class="form-check form-check-inline small"><input class="form-check-input" type="checkbox" name="methods[]" value="<?= $b_opt ?>" checked> <label class="small"><?= $b_opt ?></label></div>
                     <?php endforeach; ?>
                 </div>
-                <div class="mt-4 p-4 rounded-4 bg-light border border-2 text-center shadow-sm">
-                    <h6 class="fw-800 mb-3 text-primary">Kontak Resmi</h6>
-                    <div class="d-flex flex-column gap-3">
-                        <a href="https://wa.me/6285183156235" target="_blank" class="btn btn-success btn-sm fw-bold py-3 rounded-pill shadow-sm"><i class="fab fa-whatsapp me-2"></i>WhatsApp Support</a>
-                        <a href="mailto:care@swsagroup.id" class="btn btn-outline-primary btn-sm fw-bold py-3 rounded-pill">Email Support</a>
-                    </div>
-                </div>
-            </div>
-        </div>
+                <div class="col-12"><label class="small fw-bold">Catatan (Opsional)</label><textarea name="notes" id="mNo" class="form-control"></textarea></div>
+            </div></div>
+            <div class="modal-footer border-0"><button type="submit" name="save_link" class="btn btn-primary w-100 py-3 fw-bold">GENERATE PAYMENT LINK</button></div>
+        </form></div>
     </div>
-</div>
 
-<footer class="footer-accent text-center"><div class="container"><p class="small mb-0 fw-bold">© 2025 SWSAGroup Pay, All right reserved</p></div></footer>
-
-<!-- Captcha Modal Modern -->
-<div class="modal fade" id="captchaModal" data-bs-backdrop="static" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content border-0 shadow-lg overflow-hidden" style="border-radius: 4px; width: 350px; margin: auto;">
-            <div class="captcha-header">
-                <p class="m-0 small opacity-75 fw-bold">Pilih semua gambar yang bertema:</p>
-                <h4 class="m-0 fw-800" id="captcha-target-text">TEMA</h4>
-            </div>
-            <div class="modal-body p-0"><div class="captcha-grid" id="grid"></div></div>
-            <div class="modal-footer d-flex justify-content-between p-2">
-                <div class="small text-muted"><i class="fa fa-info-circle me-1"></i>Tahap <span id="captcha-step">1</span>/2</div>
-                <button type="button" class="btn btn-primary btn-sm fw-bold px-4" onclick="verifyCaptchaSelection()">VERIFIKASI</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<script>
-    // --- REALTIME PING FUNCTION ---
-    async function measurePing() {
-        const start = performance.now();
-        try {
-            // Mengukur latensi nyata ke pay.swsagroup.id menggunakan fetch HEAD
-            await fetch('https://pay.swsagroup.id/favicon.ico?cache=' + start, { 
-                method: 'HEAD', 
-                mode: 'no-cors',
-                cache: 'no-store' 
-            });
-            const end = performance.now();
-            const ping = Math.round(end - start);
-            document.getElementById('load-ms').innerText = ping;
-        } catch (e) {
-            // Fallback jika terjadi error koneksi
-            document.getElementById('load-ms').innerText = Math.floor(Math.random() * 10) + 10;
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('active');
+            document.getElementById('overlay').classList.toggle('active');
         }
-    }
-    // Jalankan setiap 3 detik
-    measurePing();
-    setInterval(measurePing, 3000);
-
-    // --- IDLE TIMEOUT 5 MENIT ---
-    let idleSecondsCounter = 0;
-    document.onmousemove = document.onkeypress = document.ontouchstart = function() { idleSecondsCounter = 0; };
-    setInterval(function() {
-        if (!document.getElementById('sect-pay').classList.contains('d-none')) {
-            idleSecondsCounter++;
-            if (idleSecondsCounter >= 300) { location.reload(); }
+        function toggleDate(v){ document.getElementById('dateBox').classList.toggle('d-none', v==='Unlimited'); }
+        function showModal(){ 
+            document.getElementById('mId').value=""; 
+            document.getElementById('mTitle').innerText="Generate New Link"; 
+            document.getElementById('mTi').value=""; document.getElementById('mCu').value=""; 
+            document.getElementById('mPr').value=""; 
+            document.getElementById('amountIn').value=""; 
+            document.getElementById('mNo').value=""; 
+            new bootstrap.Modal('#modalLink').show(); 
         }
-    }, 1000);
-
-    function updateFileName(input) {
-        const display = document.getElementById('fileNameDisplay');
-        display.innerText = input.files.length > 0 ? "File: " + input.files[0].name : "";
-    }
-
-    const bankData = <?= json_encode($banks) ?>;
-    document.getElementById('bankSelect')?.addEventListener('change', function() {
-        const n = this.value; const b = document.getElementById('methodDetail');
-        if(n && bankData[n]){
-            const d = bankData[n]; let h = `<div class='small text-muted mb-1 text-uppercase fw-bold' style='font-size:9px'>Tujuan Transfer:</div>`;
-            if(d.nmid) { 
-                h += `<h5 class='fw-800 text-primary mb-1'>NMID: <span id='cN'>${d.nmid}</span></h5>`; 
-                if(d.qris_img) {
-                    h += `<img src='uploads/${d.qris_img}' class='img-fluid rounded-4 mt-2 mb-2 shadow-sm' style='max-height:160px'><br>`;
-                    h += `<a href='uploads/${d.qris_img}' download='QRIS_SWSAGroup.png' class='btn btn-primary btn-sm fw-bold px-4 rounded-pill mt-1'><i class='fa fa-download me-2'></i>SIMPAN QRIS</a>`;
-                }
-            } else { 
-                h += `<h5 class='fw-800 text-primary mb-1'>No. Rek: <span id='cA'>${d.acc}</span> <button type='button' class='btn btn-light btn-sm border ms-2' onclick="cT('cA')">Salin</button></h5>`; 
-            }
-            h += `<div class='fw-bold small text-dark mt-1'>A/N: ${d.owner}</div>`; b.innerHTML = h; b.classList.remove('d-none');
-        } else { b.classList.add('d-none'); }
-    });
-
-    function cT(id) { navigator.clipboard.writeText(document.getElementById(id).innerText); Swal.fire({ icon: 'success', title: 'Salin Berhasil', timer: 1000, showConfirmButton: false }); }
-
-    // --- CAPTCHA PRO v4 GRID ---
-    let step = 1, currentTarget = "", selectedIndices = [];
-    const pool = [
-        { url: 'https://images.unsplash.com/photo-1544620347-c4fd4a3d5957?w=150', tag: 'Bus' },
-        { url: 'https://images.unsplash.com/photo-1541888946425-d81bb19240f5?w=150', tag: 'Jembatan' },
-        { url: 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=150', tag: 'Kopi' },
-        { url: 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=150', tag: 'Gunung' },
-        { url: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=150', tag: 'Hewan' },
-        { url: 'https://images.unsplash.com/photo-1481349518771-20055b2a7b24?w=150', tag: 'Buah' },
-        { url: 'https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=150', tag: 'Laptop' },
-        { url: 'https://images.unsplash.com/photo-1503376780353-7e6692767b70?w=150', tag: 'Mobil' },
-        { url: 'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?w=150', tag: 'Pemandangan' },
-        { url: 'https://images.unsplash.com/photo-1513542789411-b6a5d4f31634?w=150', tag: 'Mainan' },
-        { url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150', tag: 'Orang' },
-        { url: 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=150', tag: 'Jam' },
-        { url: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=150', tag: 'Toko' },
-        { url: 'https://images.unsplash.com/photo-1490730141103-6cac27aaab94?w=150', tag: 'Udara' },
-        { url: 'https://images.unsplash.com/photo-1501785888041-af3ef285b470?w=150', tag: 'Air' }
-    ];
-
-    function initCaptcha() { step = 1; loadCaptcha(); new bootstrap.Modal(document.getElementById('captchaModal')).show(); }
-
-    function loadCaptcha() {
-        selectedIndices = []; document.getElementById('captcha-step').innerText = step;
-        const grid = document.getElementById('grid'); grid.innerHTML = "";
-        const uniqueTags = [...new Set(pool.map(item => item.tag))];
-        currentTarget = uniqueTags[Math.floor(Math.random() * uniqueTags.length)];
-        document.getElementById('captcha-target-text').innerText = currentTarget;
-        let displayList = [...pool].sort(() => 0.5 - Math.random()).slice(0, 9);
-        if(!displayList.some(i => i.tag === currentTarget)){
-            const t = pool.find(i => i.tag === currentTarget); displayList[0] = t;
-            displayList = displayList.sort(() => 0.5 - Math.random());
+        function editLink(id, d){ 
+            document.getElementById('mId').value=id; 
+            document.getElementById('mTitle').innerText="Edit Link: " + id; 
+            document.getElementById('mTi').value=d.title; 
+            document.getElementById('mCu').value=d.customer; 
+            document.getElementById('mPr').value=d.product || ""; 
+            document.getElementById('amountIn').value= 'Rp. ' + new Intl.NumberFormat('id-ID').format(d.amount); 
+            document.getElementById('mEx').value=d.exp_type; 
+            toggleDate(d.exp_type);
+            document.getElementById('mEd').value=d.exp_date || ""; 
+            document.getElementById('mNo').value=d.notes; 
+            new bootstrap.Modal('#modalLink').show(); 
         }
-        displayList.forEach((item, idx) => {
-            const div = document.createElement('div'); div.className = 'captcha-img-box';
-            div.innerHTML = `<img src="${item.url}" data-tag="${item.tag}">`;
-            div.onclick = () => {
-                div.classList.toggle('selected');
-                const i = selectedIndices.indexOf(idx);
-                if(i > -1) selectedIndices.splice(i, 1); else selectedIndices.push(idx);
-            };
-            grid.appendChild(div);
+        function copy(id){ 
+            const u = window.location.origin+"/pay.php?n="+id; 
+            navigator.clipboard.writeText(u); 
+            Swal.fire({ icon: 'success', title: 'Salin Berhasil', text: u, timer: 1500, showConfirmButton: false });
+        }
+        function viewBukti(src){ 
+            Swal.fire({ 
+                imageUrl: '../uploads/'+src, 
+                imageWidth: 400, 
+                showConfirmButton: false, 
+                showCloseButton: true
+            }); 
+        }
+        function exportExcel(){ let wb = XLSX.utils.table_to_book(document.getElementById("payTable")); XLSX.writeFile(wb, "SWSAGroup_Payments.xlsx"); }
+        
+        const amIn = document.getElementById('amountIn'); 
+        if(amIn) amIn.addEventListener('input', e => { 
+            let v = e.target.value.replace(/\D/g, ''); 
+            e.target.value = v ? 'Rp. ' + new Intl.NumberFormat('id-ID').format(v) : ''; 
         });
-    }
 
-    function verifyCaptchaSelection() {
-        const gridItems = document.querySelectorAll('.captcha-img-box img');
-        let isCorrect = true, foundAny = false;
-        gridItems.forEach((img, idx) => {
-            const tag = img.getAttribute('data-tag');
-            const isSelected = selectedIndices.includes(idx);
-            if(tag === currentTarget) { foundAny = true; if(!isSelected) isCorrect = false; }
-            else { if(isSelected) isCorrect = false; }
+        document.getElementById('linkFilter')?.addEventListener('keyup', function(){ 
+            let v = this.value.toLowerCase(); 
+            document.querySelectorAll('#linkBody tr').forEach(r => r.style.display = r.innerText.toLowerCase().includes(v) ? '' : 'none'); 
         });
-        if(isCorrect && foundAny) {
-            if(step < 2) { step++; loadCaptcha(); } 
-            else {
-                bootstrap.Modal.getInstance(document.getElementById('captchaModal')).hide();
-                document.getElementById('captcha_verified').value = "1"; document.getElementById('btnSubmitForm').disabled = false;
-                document.getElementById('captcha-status-area').className = "p-3 border rounded-4 bg-success-subtle d-flex align-items-center justify-content-between";
-                document.getElementById('captcha-text').innerText = "Verifikasi Berhasil"; document.getElementById('btn-start-captcha').style.display = "none";
-            }
-        } else { Swal.fire({ title: 'Gagal', text: 'Identifikasi tidak akurat.', icon: 'error', timer: 1500 }); loadCaptcha(); }
-    }
-
-    function resetCaptcha() { step = 1; selectedIndices = []; }
-    function openSect(t) {
-        document.querySelectorAll('.nav-link-item').forEach(el => el.classList.remove('active'));
-        document.getElementById('tab-' + t).classList.add('active');
-        document.getElementById('sect-status').classList.add('d-none'); document.getElementById('sect-pay').classList.add('d-none'); document.getElementById('sect-help').classList.add('d-none');
-        document.getElementById('sect-' + t).classList.remove('d-none');
-        if(t === 'pay') idleSecondsCounter = 0;
-    }
-    const am = document.getElementById('amountIn');
-    if(am) am.addEventListener('input', e => { 
-        let v = e.target.value.replace(/\D/g, ''); 
-        e.target.value = v ? 'Rp. ' + new Intl.NumberFormat('id-ID').format(v) : ''; 
-    });
-
-    document.addEventListener('keydown', function(e) {
-        if (e.keyCode == 123 || (e.ctrlKey && e.shiftKey && (e.keyCode == 73 || e.keyCode == 74)) || (e.ctrlKey && (e.keyCode == 85 || e.keyCode == 83 || e.keyCode == 65))) {
-            e.preventDefault(); return false;
-        }
-    });
-</script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+        document.getElementById('payFilter')?.addEventListener('keyup', function(){ 
+            let v = this.value.toLowerCase(); 
+            document.querySelectorAll('#payTable tbody tr').forEach(r => r.style.display = r.innerText.toLowerCase().includes(v) ? '' : 'none'); 
+        });
+    </script>
+<?php endif; ?>
 </body>
 </html>
